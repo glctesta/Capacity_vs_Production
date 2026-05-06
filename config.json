@@ -1,0 +1,34 @@
+{
+  "server": {"host": "0.0.0.0", "port": 8087},
+  "phases": {
+    "monitored": ["ASSEMBLY", "COATING", "EOLTEST", "ICT", "PROGRAMING", "PTHSEL", "SMT"],
+    "rotation_interval_seconds": 20,
+    "manual_navigation_pause_seconds": 60
+  },
+  "data_sources": {
+    "routing_folder": "T:\\D365 routing data",
+    "routing_sheet": "Articles and phases",
+    "planning_folder": "T:\\Planning",
+    "planning_sheet": "PlanningMachine"
+  },
+  "refresh": {
+    "routing_daily_at": "07:00",
+    "planning_minutes": 30,
+    "production_seconds": 60,
+    "frontend_polling_seconds": 30
+  },
+  "shifts": [
+    {"code": "T1", "start": "07:30", "end": "15:30"},
+    {"code": "T2", "start": "15:30", "end": "23:30"},
+    {"code": "T3", "start": "23:30", "end": "07:30"}
+  ],
+  "thresholds": {"green_min_coverage_pct": 95, "yellow_min_coverage_pct": 80},
+  "email_report": {
+    "enabled": true,
+    "send_at": "07:31",
+    "skip_weekdays": ["monday"],
+    "recipients_query_attribute": "Sys_email_efficienze",
+    "subject_prefix": "[Production Efficiency]"
+  },
+  "logo_path": "static/Logo.png"
+}
