@@ -1,9 +1,16 @@
 {
   "server": {"host": "0.0.0.0", "port": 8087},
   "phases": {
-    "monitored": ["ASSEMBLY", "COATING", "EOLTEST", "ICT", "PROGRAMING", "PTHSEL", "SMT"],
+    "monitored": ["ASSEMBLY", "COATING", "EOLTEST", "FCT", "ICT", "PROGRAMING", "PTHSEL", "SMT"],
     "rotation_interval_seconds": 20,
-    "manual_navigation_pause_seconds": 60
+    "manual_navigation_pause_seconds": 60,
+    "aliases": {
+      "FINAL ASSEMBLY":    "ASSEMBLY",
+      "CONFORMAL COATING": "COATING",
+      "PTHM SELECTIVE":    "PTHSEL",
+      "SUDURA SELECTIVA":  "PTHSEL",
+      "PROGRAMARE":        "PROGRAMING"
+    }
   },
   "data_sources": {
     "routing_folder": "T:\\D365 routing data",

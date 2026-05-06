@@ -1,17 +1,17 @@
 # tests/test_data_cache.py
 from datetime import datetime, time
 from unittest.mock import MagicMock, patch
-from data_cache import DataCache
+from data_cache import DataCache, canonicalize
 from app_config import (
     AppConfig, ServerConfig, PhasesConfig, DataSourcesConfig,
     RefreshConfig, ShiftConfig, ThresholdsConfig, EmailReportConfig,
 )
 
 
-def _cfg():
+def _cfg(aliases=None):
     return AppConfig(
         server=ServerConfig(),
-        phases=PhasesConfig(monitored=["ASSEMBLY"]),
+        phases=PhasesConfig(monitored=["ASSEMBLY"], aliases=aliases or {}),
         data_sources=DataSourcesConfig(),
         refresh=RefreshConfig(),
         shifts=[
@@ -24,109 +24,131 @@ def _cfg():
     )
 
 
+def test_canonicalize_with_alias():
+    aliases = {"FINAL ASSEMBLY": "ASSEMBLY", "PTHM SELECTIVE": "PTHSEL"}
+    assert canonicalize("FINAL ASSEMBLY", aliases) == "ASSEMBLY"
+    assert canonicalize("PTHM SELECTIVE", aliases) == "PTHSEL"
+
+
+def test_canonicalize_passthrough_when_no_alias():
+    aliases = {"FINAL ASSEMBLY": "ASSEMBLY"}
+    assert canonicalize("FCT", aliases) == "FCT"
+    assert canonicalize("UNKNOWN_PHASE", aliases) == "UNKNOWN_PHASE"
+
+
+def test_canonicalize_handles_none():
+    assert canonicalize(None, {}) == ""
+
+
 def test_data_cache_initial_state():
     c = DataCache(_cfg())
     assert c.routing_cycles == {}
     assert c.today_plan == []
     assert c.phase_kpis == {}
     assert c.last_refresh_ts == {}
+    assert c.phase_mapping == {}
 
 
 def test_data_cache_lock_returns_context_manager():
     c = DataCache(_cfg())
     with c.lock():
-        pass  # should not raise
+        pass
 
 
 @patch("data_cache.load_latest_routing")
 @patch("data_cache.get_phase_mapping")
-def test_refresh_routing_populates_cycles_and_mapping(mock_mapping, mock_load):
-    """phase_mapping is keyed by traceability_phase_name (matches routing headers
-    and config.monitored). planning_to_traceability_name lets us translate
-    planning Excel names to traceability namespace upstream."""
-    from datetime import datetime
+def test_refresh_routing_canonicalizes_cycles_and_builds_multi_id_mapping(
+    mock_mapping, mock_load,
+):
+    """Cycle keys are canonicalized; phase_mapping is canonical -> [trace_ids]."""
     mock_load.return_value = (
-        {("P1", "ASSEMBLY"): 2.5}, "/tmp/r.xlsx", datetime(2026, 5, 6),
+        # Routing has raw header "FINAL ASSEMBLY" — alias rewrites to "ASSEMBLY"
+        {("P1", "FINAL ASSEMBLY"): 2.5, ("P1", "FCT"): 4.0},
+        "/tmp/r.xlsx", datetime(2026, 5, 6),
     )
     from engine.models import PhaseMap
-    # Simulate real data: planning name "FINAL ASSEMBLY" maps to traceability "ASSEMBLY"
-    mock_mapping.return_value = [PhaseMap("FINAL ASSEMBLY", 10, 2, "ASSEMBLY")]
-    c = DataCache(_cfg())
+    # Same Planning_PhaseName "FINAL ASSEMBLY" maps to TWO trace ids: 110 + 112
+    mock_mapping.return_value = [
+        PhaseMap("FINAL ASSEMBLY", 7, 110, "FINAL ASSEMBLY"),
+        PhaseMap("FINAL ASSEMBLY", 7, 112, "PROGRAMARE"),
+        PhaseMap("FCT", 4, 103, "FCT"),
+    ]
+    c = DataCache(_cfg(aliases={"FINAL ASSEMBLY": "ASSEMBLY"}))
     c.refresh_routing(conn=MagicMock())
+    # Cycles canonicalized
     assert c.routing_cycles[("P1", "ASSEMBLY")] == 2.5
-    # phase_mapping keyed by traceability name
-    assert c.phase_mapping["ASSEMBLY"] == 2
-    # translation table populated
-    assert c.planning_to_traceability_name["FINAL ASSEMBLY"] == "ASSEMBLY"
-    assert "routing" in c.last_refresh_ts
+    assert c.routing_cycles[("P1", "FCT")] == 4.0
+    # Multi-id mapping under canonical key
+    assert sorted(c.phase_mapping["ASSEMBLY"]) == [110, 112]
+    assert c.phase_mapping["FCT"] == [103]
 
 
 @patch("data_cache.load_today_plan")
 @patch("data_cache.resolve_orders_to_products")
-def test_refresh_planning_translates_phase_names(mock_resolve, mock_load):
-    """Planning rows arrive with planning-namespace phase_name. After refresh,
-    today_plan rows have traceability-namespace phase_name (translated)."""
+def test_refresh_planning_canonicalizes_phase_names(mock_resolve, mock_load):
+    """Plan rows arrive with raw planning names; after refresh, all are canonical."""
     from datetime import date
     from engine.models import PlanRow
     mock_load.return_value = [
         PlanRow("ORD1", "FINAL ASSEMBLY", "P1", date(2026, 5, 6), 100),
-        PlanRow("ORD2", "PTHM SELECTIVE", "P2", date(2026, 5, 6), 50),
-        PlanRow("ORD3", "UNKNOWN_PHASE", "P3", date(2026, 5, 6), 10),
+        PlanRow("ORD2", "CONFORMAL COATING", "P2", date(2026, 5, 6), 50),
+        PlanRow("ORD3", "FCT", "P3", date(2026, 5, 6), 30),
     ]
-    mock_resolve.return_value = {"ORD1": (1001, "P1"), "ORD2": (1002, "P2")}
-    c = DataCache(_cfg())
-    # Pre-populate translation table (normally done by refresh_routing)
-    c.planning_to_traceability_name = {
-        "FINAL ASSEMBLY": "ASSEMBLY",
-        "PTHM SELECTIVE": "PTHSEL",
+    mock_resolve.return_value = {
+        "ORD1": (1001, "P1"), "ORD2": (1002, "P2"), "ORD3": (1003, "P3"),
     }
+    c = DataCache(_cfg(aliases={
+        "FINAL ASSEMBLY": "ASSEMBLY",
+        "CONFORMAL COATING": "COATING",
+    }))
     c.refresh_planning(conn=MagicMock())
-    # 2 rows survived translation, 1 was skipped (UNKNOWN_PHASE)
-    assert len(c.today_plan) == 2
     phase_names = {r.phase_name for r in c.today_plan}
-    assert phase_names == {"ASSEMBLY", "PTHSEL"}
-    assert c.order_to_product["ORD1"] == "P1"
+    assert phase_names == {"ASSEMBLY", "COATING", "FCT"}
+    assert len(c.today_plan) == 3  # nothing dropped — passthrough for FCT
     assert "planning" in c.last_refresh_ts
 
 
-@patch("data_cache.load_today_plan")
-@patch("data_cache.resolve_orders_to_products")
-def test_refresh_planning_passes_through_when_names_already_match(mock_resolve, mock_load):
-    """If a planning row's phase_name is already in traceability namespace
-    (which happens when the mapping table has identity entries like 'FCT'->'FCT'),
-    it passes through unchanged."""
-    from datetime import date
-    from engine.models import PlanRow
-    mock_load.return_value = [
-        PlanRow("ORD1", "FCT", "P1", date(2026, 5, 6), 100),
-    ]
-    mock_resolve.return_value = {"ORD1": (1001, "P1")}
-    c = DataCache(_cfg())
-    c.planning_to_traceability_name = {"FCT": "FCT"}
-    c.refresh_planning(conn=MagicMock())
-    assert len(c.today_plan) == 1
-    assert c.today_plan[0].phase_name == "FCT"
-
-
 @patch("data_cache.get_production_in_window")
-def test_refresh_production_builds_phase_kpis(mock_prod):
+def test_refresh_production_sums_across_multi_id_mapping(mock_prod):
+    """If a canonical phase maps to multiple trace_ids, production is summed."""
     from datetime import date
     from engine.models import PlanRow
-    cfg = _cfg()
+    cfg = _cfg(aliases={"FINAL ASSEMBLY": "ASSEMBLY"})
     cfg.phases.monitored = ["ASSEMBLY"]
     c = DataCache(cfg)
     c.routing_cycles = {("P1", "ASSEMBLY"): 6.0}  # 100 * 6 = 600 min = 10h
-    c.phase_mapping = {"ASSEMBLY": 2}
+    c.phase_mapping = {"ASSEMBLY": [110, 112]}  # 2 trace ids for ASSEMBLY
     c.today_plan = [PlanRow("ORD1", "ASSEMBLY", "P1", date(2026, 5, 6), 100)]
     c.order_to_product = {"ORD1": "P1"}
     c.order_to_id = {"ORD1": 1001}
-    mock_prod.return_value = 30  # 30 pieces produced
+    mock_prod.return_value = 30  # mock returns 30 for every call
     c.refresh_production(conn=MagicMock())
     assert "ASSEMBLY" in c.phase_kpis
     assert c.phase_kpis["ASSEMBLY"].planned_h_day == 10.0
-    # produced was returned 30 by the mock for every (order, phase, shift) combo;
-    # verify the cache actually built a KPI with non-zero produced
+    # Each shift queries 2 trace_ids → 30 + 30 = 60 pieces per shift
+    # produced_h_day > 0 confirms multi-id summing happened
     assert c.phase_kpis["ASSEMBLY"].produced_h_day > 0
-    assert c.total_kpi is not None
     assert c.total_kpi.planned_h_day == 10.0
     assert "production" in c.last_refresh_ts
+
+
+@patch("data_cache.get_production_in_window")
+def test_refresh_production_planned_visible_without_mapping(mock_prod):
+    """A canonical phase with NO traceability mapping still shows planned hours
+    (produced stays 0). Critical for phases like COATING where the planning
+    has rows but the mapping table has no Planning_PhaseName=CONFORMAL COATING."""
+    from datetime import date
+    from engine.models import PlanRow
+    cfg = _cfg(aliases={"CONFORMAL COATING": "COATING"})
+    cfg.phases.monitored = ["COATING"]
+    c = DataCache(cfg)
+    c.routing_cycles = {("P1", "COATING"): 3.0}  # 50 * 3 = 150 min = 2.5h
+    c.phase_mapping = {}  # NO mapping for COATING
+    c.today_plan = [PlanRow("ORD1", "COATING", "P1", date(2026, 5, 6), 50)]
+    c.order_to_product = {"ORD1": "P1"}
+    c.order_to_id = {"ORD1": 1001}
+    c.refresh_production(conn=MagicMock())
+    assert c.phase_kpis["COATING"].planned_h_day == 2.5
+    assert c.phase_kpis["COATING"].produced_h_day == 0.0
+    # Production query never called for unmapped phase
+    mock_prod.assert_not_called()

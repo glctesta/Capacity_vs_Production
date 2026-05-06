@@ -17,25 +17,32 @@ from engine.shift_engine import operative_day, shift_window
 logger = logging.getLogger("PianoTempi")
 
 
+def canonicalize(name: str, aliases: Dict[str, str]) -> str:
+    """Translate a phase name to its canonical form.
+    Returns the alias target if present, else the input unchanged.
+    """
+    if name is None:
+        return ""
+    return aliases.get(name, name)
+
+
 class DataCache:
-    """Singleton-style cache. Not enforced as singleton (one instance built in app.py).
-    All mutations should be done under self.lock().
+    """In-memory cache. Single instance built in app.py.
+    All mutations done under self.lock() (RLock — reentrant).
     """
 
     def __init__(self, config: AppConfig):
         self._lock = threading.RLock()
         self.config = config
-        # routing
+        # routing — keys are CANONICAL phase names
         self.routing_cycles: Dict[Tuple[str, str], float] = {}
         self.routing_source_path: str = ""
         self.routing_source_mtime: Optional[datetime] = None
-        # phase mapping — keyed by traceability_phase_name (matches routing headers
-        # AND config.phases.monitored). Plan rows are translated upstream so they
-        # also use traceability names.
-        self.phase_mapping: Dict[str, int] = {}
-        # Planning -> traceability name translation (e.g. "FINAL ASSEMBLY" -> "ASSEMBLY")
-        self.planning_to_traceability_name: Dict[str, str] = {}
-        # planning (after translation, phase_name uses traceability namespace)
+        # phase mapping — canonical name -> list of traceability_phase_id
+        # (one canonical phase may map to multiple traceability ids,
+        # e.g. ASSEMBLY = FINAL ASSEMBLY (110) + PROGRAMARE (112))
+        self.phase_mapping: Dict[str, List[int]] = {}
+        # planning — phase_name is CANONICAL after canonicalize()
         self.today_plan: List[PlanRow] = []
         self.order_to_product: Dict[str, str] = {}
         self.order_to_id: Dict[str, int] = {}
@@ -51,30 +58,35 @@ class DataCache:
 
     def refresh_routing(self, conn) -> None:
         with self._lock:
-            cycles, src, mtime = load_latest_routing(
+            aliases = self.config.phases.aliases
+            cycles_raw, src, mtime = load_latest_routing(
                 self.config.data_sources.routing_folder,
                 self.config.data_sources.routing_sheet,
             )
-            self.routing_cycles = cycles
+            # Canonicalize phase header in cycle keys
+            cycles_canon: Dict[Tuple[str, str], float] = {}
+            for (product_code, phase_raw), cycle_minutes in cycles_raw.items():
+                phase_canon = canonicalize(phase_raw, aliases)
+                cycles_canon[(product_code, phase_canon)] = cycle_minutes
+            self.routing_cycles = cycles_canon
             self.routing_source_path = src
             self.routing_source_mtime = mtime
+
             try:
-                mapping = get_phase_mapping(conn)
-                # phase_mapping keyed by traceability name (matches routing headers
-                # and config.monitored after the planning->traceability translation).
-                self.phase_mapping = {
-                    pm.traceability_phase_name: pm.traceability_phase_id
-                    for pm in mapping if pm.traceability_phase_name
-                }
-                # Translation table: planning name (Excel column E) -> traceability name
-                self.planning_to_traceability_name = {
-                    pm.planning_phase_name: pm.traceability_phase_name
-                    for pm in mapping
-                    if pm.planning_phase_name and pm.traceability_phase_name
-                }
+                mapping_rows = get_phase_mapping(conn)
+                # Build canonical -> [traceability_phase_id, ...]
+                canon_to_ids: Dict[str, List[int]] = {}
+                for pm in mapping_rows:
+                    if not pm.planning_phase_name:
+                        continue
+                    canon = canonicalize(pm.planning_phase_name, aliases)
+                    if pm.traceability_phase_id not in canon_to_ids.setdefault(canon, []):
+                        canon_to_ids[canon].append(pm.traceability_phase_id)
+                self.phase_mapping = canon_to_ids
                 logger.info(
-                    "phase mapping loaded: %d entries (%d planning->traceability translations)",
-                    len(self.phase_mapping), len(self.planning_to_traceability_name),
+                    "phase mapping loaded: %d canonical phases (%s)",
+                    len(self.phase_mapping),
+                    {k: v for k, v in self.phase_mapping.items()},
                 )
             except Exception as e:
                 logger.error("phase mapping query failed: %s -- keeping previous", e)
@@ -82,39 +94,35 @@ class DataCache:
 
     def refresh_planning(self, conn) -> None:
         with self._lock:
+            aliases = self.config.phases.aliases
             today = operative_day(datetime.now())
             raw_plan = load_today_plan(
                 self.config.data_sources.planning_folder,
                 self.config.data_sources.planning_sheet,
                 target_date=today, conn=conn,
             )
-            # Translate each row's phase_name from planning namespace to traceability
-            # namespace so it matches routing Excel headers and config.monitored.
-            translated: List[PlanRow] = []
-            unknown: Dict[str, int] = {}
+            # Canonicalize phase_name on each row
+            canonicalized: List[PlanRow] = []
+            translation_summary: Dict[str, str] = {}
             for r in raw_plan:
-                tname = self.planning_to_traceability_name.get(r.phase_name)
-                if tname is None:
-                    unknown[r.phase_name] = unknown.get(r.phase_name, 0) + 1
-                    continue
-                translated.append(PlanRow(
+                canon = canonicalize(r.phase_name, aliases)
+                if r.phase_name != canon:
+                    translation_summary[r.phase_name] = canon
+                canonicalized.append(PlanRow(
                     order_number=r.order_number,
-                    phase_name=tname,
+                    phase_name=canon,
                     product_code=r.product_code,
                     production_date=r.production_date,
                     planned_qty=r.planned_qty,
                 ))
-            if unknown:
-                logger.warning(
-                    "%d planning rows skipped due to unknown phase name (no mapping): %s",
-                    sum(unknown.values()), unknown,
+            if translation_summary:
+                logger.info(
+                    "planning phase aliases applied: %s", translation_summary,
                 )
-            self.today_plan = translated
-            logger.info(
-                "today_plan: %d rows after planning->traceability translation (from %d raw)",
-                len(translated), len(raw_plan),
-            )
-            order_numbers = {r.order_number for r in translated}
+            self.today_plan = canonicalized
+            logger.info("today_plan: %d rows after alias normalization", len(canonicalized))
+
+            order_numbers = {r.order_number for r in canonicalized}
             resolved = resolve_orders_to_products(conn, order_numbers)
             self.order_to_product = {k: v[1] for k, v in resolved.items()}
             self.order_to_id = {k: v[0] for k, v in resolved.items()}
@@ -127,11 +135,14 @@ class DataCache:
             shifts = self.config.shifts
             produced: Dict[Tuple[str, str, str], int] = {}
             any_t3_production = False
+
             for plan_row in self.today_plan:
-                phase_name = plan_row.phase_name
-                if phase_name not in self.phase_mapping:
+                phase_name = plan_row.phase_name  # already canonical
+                trace_ids = self.phase_mapping.get(phase_name, [])
+                if not trace_ids:
+                    # No traceability mapping for this canonical phase: planned hours
+                    # will still show; produced stays 0 for this phase.
                     continue
-                trace_id = self.phase_mapping[phase_name]
                 id_order = self.order_to_id.get(plan_row.order_number)
                 if id_order is None:
                     continue
@@ -140,10 +151,20 @@ class DataCache:
                     if s_start > now:
                         continue
                     q_end = min(s_end, now)
-                    qty = get_production_in_window(conn, id_order, trace_id, s_start, q_end)
-                    if qty > 0:
+                    qty_total = 0
+                    for trace_id in trace_ids:
+                        try:
+                            qty_total += get_production_in_window(
+                                conn, id_order, trace_id, s_start, q_end,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "production query failed (order=%d trace_id=%d): %s",
+                                id_order, trace_id, e,
+                            )
+                    if qty_total > 0:
                         key = (plan_row.order_number, phase_name, shift.code)
-                        produced[key] = produced.get(key, 0) + qty
+                        produced[key] = produced.get(key, 0) + qty_total
                         if shift.code == "T3":
                             any_t3_production = True
 

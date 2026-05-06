@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import time as dtime
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 
 @dataclass
@@ -17,6 +17,10 @@ class PhasesConfig:
     monitored: List[str] = field(default_factory=list)
     rotation_interval_seconds: int = 20
     manual_navigation_pause_seconds: int = 60
+    # Translation table: any non-canonical phase name → canonical name.
+    # Applied to routing Excel column headers and planning Excel column E values.
+    # Identity mappings (X → X) can be omitted; missing entries pass through unchanged.
+    aliases: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
