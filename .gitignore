@@ -9,5 +9,6 @@ data/daily_history_*.json
 .pytest_cache/
 .idea/
 .vscode/
+.claude/
 *.tmp
 *.corrupt-*
