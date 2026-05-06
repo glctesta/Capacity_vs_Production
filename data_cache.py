@@ -29,9 +29,13 @@ class DataCache:
         self.routing_cycles: Dict[Tuple[str, str], float] = {}
         self.routing_source_path: str = ""
         self.routing_source_mtime: Optional[datetime] = None
-        # phase mapping (planning_phase_name -> traceability_phase_id)
+        # phase mapping — keyed by traceability_phase_name (matches routing headers
+        # AND config.phases.monitored). Plan rows are translated upstream so they
+        # also use traceability names.
         self.phase_mapping: Dict[str, int] = {}
-        # planning
+        # Planning -> traceability name translation (e.g. "FINAL ASSEMBLY" -> "ASSEMBLY")
+        self.planning_to_traceability_name: Dict[str, str] = {}
+        # planning (after translation, phase_name uses traceability namespace)
         self.today_plan: List[PlanRow] = []
         self.order_to_product: Dict[str, str] = {}
         self.order_to_id: Dict[str, int] = {}
@@ -56,9 +60,22 @@ class DataCache:
             self.routing_source_mtime = mtime
             try:
                 mapping = get_phase_mapping(conn)
+                # phase_mapping keyed by traceability name (matches routing headers
+                # and config.monitored after the planning->traceability translation).
                 self.phase_mapping = {
-                    pm.planning_phase_name: pm.traceability_phase_id for pm in mapping
+                    pm.traceability_phase_name: pm.traceability_phase_id
+                    for pm in mapping if pm.traceability_phase_name
                 }
+                # Translation table: planning name (Excel column E) -> traceability name
+                self.planning_to_traceability_name = {
+                    pm.planning_phase_name: pm.traceability_phase_name
+                    for pm in mapping
+                    if pm.planning_phase_name and pm.traceability_phase_name
+                }
+                logger.info(
+                    "phase mapping loaded: %d entries (%d planning->traceability translations)",
+                    len(self.phase_mapping), len(self.planning_to_traceability_name),
+                )
             except Exception as e:
                 logger.error("phase mapping query failed: %s -- keeping previous", e)
             self.last_refresh_ts["routing"] = datetime.now()
@@ -66,13 +83,38 @@ class DataCache:
     def refresh_planning(self, conn) -> None:
         with self._lock:
             today = operative_day(datetime.now())
-            plan = load_today_plan(
+            raw_plan = load_today_plan(
                 self.config.data_sources.planning_folder,
                 self.config.data_sources.planning_sheet,
                 target_date=today, conn=conn,
             )
-            self.today_plan = plan
-            order_numbers = {r.order_number for r in plan}
+            # Translate each row's phase_name from planning namespace to traceability
+            # namespace so it matches routing Excel headers and config.monitored.
+            translated: List[PlanRow] = []
+            unknown: Dict[str, int] = {}
+            for r in raw_plan:
+                tname = self.planning_to_traceability_name.get(r.phase_name)
+                if tname is None:
+                    unknown[r.phase_name] = unknown.get(r.phase_name, 0) + 1
+                    continue
+                translated.append(PlanRow(
+                    order_number=r.order_number,
+                    phase_name=tname,
+                    product_code=r.product_code,
+                    production_date=r.production_date,
+                    planned_qty=r.planned_qty,
+                ))
+            if unknown:
+                logger.warning(
+                    "%d planning rows skipped due to unknown phase name (no mapping): %s",
+                    sum(unknown.values()), unknown,
+                )
+            self.today_plan = translated
+            logger.info(
+                "today_plan: %d rows after planning->traceability translation (from %d raw)",
+                len(translated), len(raw_plan),
+            )
+            order_numbers = {r.order_number for r in translated}
             resolved = resolve_orders_to_products(conn, order_numbers)
             self.order_to_product = {k: v[1] for k, v in resolved.items()}
             self.order_to_id = {k: v[0] for k, v in resolved.items()}
