@@ -125,3 +125,64 @@ def build_flask_app(cache: DataCache) -> Flask:
             })
 
     return app
+
+
+def conn_factory():
+    """Create a managed DB connection. Returns a context-manager-compatible object.
+
+    Used by the scheduler to get a fresh connection per job.
+    """
+    from config_manager import ConfigManager
+    from db_connection import DatabaseConnection
+    cm = ConfigManager()
+    return DatabaseConnection(cm)
+
+
+def main():
+    import atexit
+    from app_config import load_config
+
+    logger = setup_logging()
+    logger.info("=" * 60)
+    logger.info("PianoTempi - Production Efficiency Monitor - starting")
+    logger.info("=" * 60)
+    config = load_config("config.json")
+    cache = DataCache(config)
+
+    logger.info("initial data load...")
+    try:
+        with conn_factory() as conn:
+            try:
+                cache.refresh_routing(conn)
+            except Exception as e:
+                logger.error("initial refresh_routing failed: %s", e)
+            try:
+                cache.refresh_planning(conn)
+            except Exception as e:
+                logger.error("initial refresh_planning failed: %s", e)
+            try:
+                cache.refresh_production(conn)
+            except Exception as e:
+                logger.error("initial refresh_production failed: %s", e)
+        logger.info("initial load complete")
+    except Exception as e:
+        logger.error("initial load could not open DB connection: %s -- continuing with empty cache", e)
+
+    from scheduler import build_scheduler
+    sched = build_scheduler(cache, config, conn_factory)
+    sched.start()
+    atexit.register(lambda: sched.shutdown(wait=False))
+    logger.info("scheduler started with %d jobs", len(sched.get_jobs()))
+
+    flask_app = build_flask_app(cache)
+    logger.info("server listening on http://%s:%d", config.server.host, config.server.port)
+    flask_app.run(
+        host=config.server.host,
+        port=config.server.port,
+        debug=False,
+        use_reloader=False,
+    )
+
+
+if __name__ == "__main__":
+    main()
