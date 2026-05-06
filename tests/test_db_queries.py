@@ -4,7 +4,8 @@ from unittest.mock import MagicMock
 import pytest
 from data_sources.db_queries import (
     get_phase_mapping, resolve_orders_to_products,
-    get_production_in_window, get_email_recipients,
+    get_production_in_window, get_production_by_phase_in_window,
+    get_email_recipients,
 )
 
 
@@ -54,6 +55,31 @@ def test_get_production_in_window_returns_zero_on_none():
     cursor.fetchone.return_value = None
     qty = get_production_in_window(conn, 1, 2, datetime.now(), datetime.now())
     assert qty == 0
+
+
+def test_get_production_by_phase_returns_per_order_rows():
+    conn, cursor = _conn_with_rows([])
+    cursor.fetchall.return_value = [
+        (1001, "ORD1", 30),
+        (1002, "ORD2", 50),
+        (1003, "ORD3", 0),  # should be filtered (HAVING > 0 in SQL, but defensive too)
+    ]
+    rows = get_production_by_phase_in_window(
+        conn, traceability_phase_id=2,
+        start_dt=datetime(2026, 5, 6, 7, 30),
+        end_dt=datetime(2026, 5, 6, 15, 30),
+    )
+    assert (1001, "ORD1", 30) in rows
+    assert (1002, "ORD2", 50) in rows
+
+
+def test_get_production_by_phase_empty_when_no_rows():
+    conn, cursor = _conn_with_rows([])
+    cursor.fetchall.return_value = []
+    rows = get_production_by_phase_in_window(
+        conn, 2, datetime.now(), datetime.now(),
+    )
+    assert rows == []
 
 
 def test_get_email_recipients_splits_csv():

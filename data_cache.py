@@ -6,7 +6,9 @@ from typing import Dict, List, Optional, Tuple
 
 from app_config import AppConfig
 from data_sources.db_queries import (
-    get_phase_mapping, get_production_in_window, resolve_orders_to_products,
+    get_phase_mapping,
+    get_production_by_phase_in_window,
+    resolve_orders_to_products,
 )
 from data_sources.planning_excel import load_today_plan
 from data_sources.routing_excel import load_latest_routing
@@ -129,45 +131,66 @@ class DataCache:
             self.last_refresh_ts["planning"] = datetime.now()
 
     def refresh_production(self, conn) -> None:
+        """Query production for ALL orders (not just today's plan) per monitored phase
+        and shift window. Resolves any new orders to products, then computes KPIs.
+        """
         with self._lock:
             now = datetime.now()
             op_day = operative_day(now)
             shifts = self.config.shifts
             produced: Dict[Tuple[str, str, str], int] = {}
             any_t3_production = False
+            seen_order_numbers: set = set()
 
-            for plan_row in self.today_plan:
-                phase_name = plan_row.phase_name  # already canonical
-                trace_ids = self.phase_mapping.get(phase_name, [])
+            # 1. Iterate by monitored canonical phase + shift + traceability id
+            for canonical_phase in self.config.phases.monitored:
+                trace_ids = self.phase_mapping.get(canonical_phase, [])
                 if not trace_ids:
-                    # No traceability mapping for this canonical phase: planned hours
-                    # will still show; produced stays 0 for this phase.
-                    continue
-                id_order = self.order_to_id.get(plan_row.order_number)
-                if id_order is None:
+                    # No traceability mapping → can't query; planned hours still work.
                     continue
                 for shift in shifts:
                     s_start, s_end = shift_window(op_day, shift)
                     if s_start > now:
                         continue
                     q_end = min(s_end, now)
-                    qty_total = 0
                     for trace_id in trace_ids:
                         try:
-                            qty_total += get_production_in_window(
-                                conn, id_order, trace_id, s_start, q_end,
+                            rows = get_production_by_phase_in_window(
+                                conn, trace_id, s_start, q_end,
                             )
                         except Exception as e:
                             logger.error(
-                                "production query failed (order=%d trace_id=%d): %s",
-                                id_order, trace_id, e,
+                                "production query failed (trace_id=%d shift=%s): %s",
+                                trace_id, shift.code, e,
                             )
-                    if qty_total > 0:
-                        key = (plan_row.order_number, phase_name, shift.code)
-                        produced[key] = produced.get(key, 0) + qty_total
-                        if shift.code == "T3":
-                            any_t3_production = True
+                            continue
+                        for (id_order, order_number, qty) in rows:
+                            if qty <= 0:
+                                continue
+                            seen_order_numbers.add(order_number)
+                            # Cache id_order even before resolving the product
+                            self.order_to_id[order_number] = id_order
+                            key = (order_number, canonical_phase, shift.code)
+                            produced[key] = produced.get(key, 0) + qty
+                            if shift.code == "T3":
+                                any_t3_production = True
 
+            # 2. Resolve any orders not yet in the product cache (out-of-plan orders).
+            unresolved = seen_order_numbers - set(self.order_to_product.keys())
+            if unresolved:
+                try:
+                    new_resolved = resolve_orders_to_products(conn, unresolved)
+                    for ord_num, (id_ord, prod_code) in new_resolved.items():
+                        self.order_to_product[ord_num] = prod_code
+                        self.order_to_id[ord_num] = id_ord
+                    logger.info(
+                        "resolved %d new out-of-plan order(s) to products",
+                        len(new_resolved),
+                    )
+                except Exception as e:
+                    logger.error("resolve out-of-plan orders failed: %s", e)
+
+            # 3. Build PhaseKPI for each monitored phase
             kpis: Dict[str, PhaseKPI] = {}
             for phase_name in self.config.phases.monitored:
                 kpi = build_phase_kpi(

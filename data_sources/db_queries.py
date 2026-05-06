@@ -102,6 +102,47 @@ def get_production_in_window(
     return int(row[0])
 
 
+def get_production_by_phase_in_window(
+    conn, traceability_phase_id: int,
+    start_dt: datetime, end_dt: datetime,
+) -> List[Tuple[int, str, int]]:
+    """Returns [(id_order, order_number, produced_qty), ...] for ALL orders
+    that produced in `traceability_phase_id` during [start_dt, end_dt).
+
+    Same SQL pattern as get_production_in_window but grouped by order
+    instead of filtered by a single order. Used to capture production
+    activity for orders not present in today's plan."""
+    sql = """
+        SELECT Orders.IdOrder,
+               Orders.OrderNumber,
+               COUNT(DISTINCT Traceability_rs.dbo.BoardLabels(Scannings.IDBoard)) AS Qty
+        FROM Traceability_rs.dbo.Scannings
+        INNER JOIN Traceability_rs.dbo.OrderPhases
+            ON Scannings.IDOrderPhase = OrderPhases.IDOrderPhase
+        INNER JOIN Traceability_rs.dbo.Orders
+            ON OrderPhases.IDOrder = Orders.IDOrder
+        INNER JOIN Traceability_rs.dbo.Phases
+            ON OrderPhases.IDPhase = Phases.IDPhase
+        INNER JOIN Traceability_rs.dbo.Boards
+            ON Boards.IDBoard = Scannings.IDBoard
+        WHERE Scannings.ScanTimeFinish >= ?
+          AND Scannings.ScanTimeFinish < ?
+          AND Scannings.IsPass = 1
+          AND Phases.IdPhase = ?
+        GROUP BY Orders.IdOrder, Orders.OrderNumber
+        HAVING COUNT(DISTINCT Traceability_rs.dbo.BoardLabels(Scannings.IDBoard)) > 0
+    """
+    cursor = conn.cursor()
+    cursor.execute(sql, start_dt, end_dt, traceability_phase_id)
+    rows = []
+    for row in cursor.fetchall():
+        if row[0] is None or row[2] is None:
+            continue
+        rows.append((int(row[0]), str(row[1]).strip(), int(row[2])))
+    cursor.close()
+    return rows
+
+
 def get_email_recipients(conn) -> List[str]:
     """Reads first row of settings.Value for Attribute='Sys_email_efficienze',
     splits on ',' and ';'. Empty list if no row matches."""

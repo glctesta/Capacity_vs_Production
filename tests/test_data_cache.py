@@ -108,9 +108,10 @@ def test_refresh_planning_canonicalizes_phase_names(mock_resolve, mock_load):
     assert "planning" in c.last_refresh_ts
 
 
-@patch("data_cache.get_production_in_window")
+@patch("data_cache.get_production_by_phase_in_window")
 def test_refresh_production_sums_across_multi_id_mapping(mock_prod):
-    """If a canonical phase maps to multiple trace_ids, production is summed."""
+    """If a canonical phase maps to multiple trace_ids, production is summed
+    across all of them."""
     from datetime import date
     from engine.models import PlanRow
     cfg = _cfg(aliases={"FINAL ASSEMBLY": "ASSEMBLY"})
@@ -121,18 +122,18 @@ def test_refresh_production_sums_across_multi_id_mapping(mock_prod):
     c.today_plan = [PlanRow("ORD1", "ASSEMBLY", "P1", date(2026, 5, 6), 100)]
     c.order_to_product = {"ORD1": "P1"}
     c.order_to_id = {"ORD1": 1001}
-    mock_prod.return_value = 30  # mock returns 30 for every call
+    # mock returns 30 pieces produced for ORD1 on every call
+    mock_prod.return_value = [(1001, "ORD1", 30)]
     c.refresh_production(conn=MagicMock())
     assert "ASSEMBLY" in c.phase_kpis
     assert c.phase_kpis["ASSEMBLY"].planned_h_day == 10.0
-    # Each shift queries 2 trace_ids → 30 + 30 = 60 pieces per shift
-    # produced_h_day > 0 confirms multi-id summing happened
+    # Multiple trace_ids per shift → multiple calls → produced_h_day > 0
     assert c.phase_kpis["ASSEMBLY"].produced_h_day > 0
     assert c.total_kpi.planned_h_day == 10.0
     assert "production" in c.last_refresh_ts
 
 
-@patch("data_cache.get_production_in_window")
+@patch("data_cache.get_production_by_phase_in_window")
 def test_refresh_production_planned_visible_without_mapping(mock_prod):
     """A canonical phase with NO traceability mapping still shows planned hours
     (produced stays 0). Critical for phases like COATING where the planning
@@ -152,3 +153,35 @@ def test_refresh_production_planned_visible_without_mapping(mock_prod):
     assert c.phase_kpis["COATING"].produced_h_day == 0.0
     # Production query never called for unmapped phase
     mock_prod.assert_not_called()
+
+
+@patch("data_cache.get_production_by_phase_in_window")
+@patch("data_cache.resolve_orders_to_products")
+def test_refresh_production_includes_out_of_plan_orders(mock_resolve, mock_prod):
+    """If an order is producing on SMT but not in today's plan, it must still
+    appear in the SMT KPI. The out-of-plan order gets resolved to its product
+    so its hours can be computed via cycle_time × qty."""
+    from datetime import date
+    from engine.models import PlanRow
+    cfg = _cfg(aliases={"AOI": "SMT"})
+    cfg.phases.monitored = ["SMT"]
+    c = DataCache(cfg)
+    c.routing_cycles = {("PROD_X", "SMT"): 0.5}  # 0.5 min/piece
+    c.phase_mapping = {"SMT": [2]}  # AOI traceability id
+    # Today's plan is empty for SMT
+    c.today_plan = []
+    c.order_to_product = {}  # empty — out-of-plan order needs resolution
+    c.order_to_id = {}
+    # Production query returns an order that's NOT in today's plan
+    mock_prod.return_value = [(9999, "OUT_OF_PLAN_ORD", 120)]  # 120 pieces
+    # resolve_orders_to_products returns the product for the out-of-plan order
+    mock_resolve.return_value = {"OUT_OF_PLAN_ORD": (9999, "PROD_X")}
+    c.refresh_production(conn=MagicMock())
+    # SMT panel shows produced hours from out-of-plan production
+    # 120 pieces × 0.5 min × 2 shifts (T1+T2 active) = 120 min = 2.0h
+    # (queries fire for each shift+trace_id combination)
+    assert c.phase_kpis["SMT"].produced_h_day > 0
+    # Plan stays at 0 (no plan rows)
+    assert c.phase_kpis["SMT"].planned_h_day == 0.0
+    # The out-of-plan order was added to the cache
+    assert c.order_to_product["OUT_OF_PLAN_ORD"] == "PROD_X"
