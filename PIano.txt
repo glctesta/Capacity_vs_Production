@@ -1,0 +1,1 @@
+gli indirizzi a cui inviare l'email si ricaveranno dalla tabella traceability_rs.dbo.settimgs con chiave 'Atribute' = 'Sys_email_efficienze'.

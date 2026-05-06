@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+logs/
+data/daily_history_*.json
+.superpowers/
+.pytest_cache/
+.idea/
+.vscode/
+*.tmp
+*.corrupt-*
