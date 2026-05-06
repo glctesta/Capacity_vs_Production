@@ -92,3 +92,40 @@ def test_build_phase_kpi_zero_planned_no_division_error():
     assert kpi.planned_h_day == 0.0
     assert kpi.coverage_pct_day == 0.0
     assert kpi.status_color == "red"
+
+
+def test_curve_points_during_t1():
+    """At 11:30, only 'now' point should be included (no shift completed yet)."""
+    plan = [PlanRow("ORD1", "ASSEMBLY", "P1", date(2026, 5, 6), 100)]
+    cycles = {("P1", "ASSEMBLY"): 6.0}  # 10h
+    produced = {("ORD1", "ASSEMBLY", "T1"): 30}  # 3h
+    order_to_product = {"ORD1": "P1"}
+    now = datetime(2026, 5, 6, 11, 30)
+    kpi = build_phase_kpi(
+        phase_name="ASSEMBLY", plan=plan, cycles=cycles,
+        produced=produced, order_to_product=order_to_product,
+        now=now, shifts=SHIFTS, thresholds=THRESH, any_t3_production=False,
+    )
+    assert len(kpi.curve_points) == 1
+    assert kpi.curve_points[0][0] == time(11, 30)
+    assert kpi.curve_points[0][1] == 3.0
+
+
+def test_curve_points_after_t1_complete():
+    """At 16:00, T1 finished (cumul at end of T1 included) + 'now'."""
+    plan = [PlanRow("ORD1", "ASSEMBLY", "P1", date(2026, 5, 6), 100)]
+    cycles = {("P1", "ASSEMBLY"): 6.0}
+    produced = {
+        ("ORD1", "ASSEMBLY", "T1"): 60,  # 6h
+        ("ORD1", "ASSEMBLY", "T2"): 5,   # 0.5h
+    }
+    order_to_product = {"ORD1": "P1"}
+    now = datetime(2026, 5, 6, 16, 0)
+    kpi = build_phase_kpi(
+        phase_name="ASSEMBLY", plan=plan, cycles=cycles,
+        produced=produced, order_to_product=order_to_product,
+        now=now, shifts=SHIFTS, thresholds=THRESH, any_t3_production=False,
+    )
+    assert len(kpi.curve_points) == 2
+    assert kpi.curve_points[0] == (time(15, 30), 6.0)
+    assert kpi.curve_points[1] == (time(16, 0), 6.5)

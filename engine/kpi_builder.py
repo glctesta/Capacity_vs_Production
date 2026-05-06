@@ -98,8 +98,22 @@ def build_phase_kpi(
     # 15: status color
     status = _status_color(coverage_pct_day, thresholds)
 
-    # 16: curve_points (filled in sub-task 5.2)
+    # 16: curve_points - end of each completed shift + now (if shift in progress)
     curve_points: List[Tuple[time, float]] = []
+    cumul_minutes = 0.0
+    for s in shifts:
+        # Skip T3 if no production at all in T3
+        if s.code == "T3" and not any_t3_production:
+            continue
+        s_start, s_end = shift_window(op_day, s)
+        if now >= s_end:
+            # shift completed -> add cumul at end
+            cumul_minutes += produced_min_by_phase_shift.get((phase_name, s.code), 0.0)
+            curve_points.append((s.end, minutes_to_hours(cumul_minutes)))
+        elif s.code == shift_curr:
+            # current shift in progress -> add 'now' point with day-cumul
+            curve_points.append((now.time().replace(microsecond=0), produced_h_day))
+            break
 
     return PhaseKPI(
         phase_name=phase_name,
