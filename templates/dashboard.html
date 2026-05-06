@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Production Efficiency</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+  <script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
+</head>
+<body>
+  <div id="dash" class="dash"
+       data-polling-seconds="{{ polling_seconds }}"
+       data-rotation-seconds="{{ rotation_seconds }}"
+       data-manual-pause-seconds="{{ manual_pause_seconds }}">
+    <header class="dash-header">
+      <img class="logo" src="{{ url_for('static', filename='Logo.png') }}" alt="Logo">
+      <div class="title">PRODUCTION EFFICIENCY</div>
+      <div class="clock">
+        <div class="date-time">
+          <b id="hdr-time">--:--:--</b>
+          <span id="hdr-date"></span>
+        </div>
+        <div id="hdr-health" class="health">● data ok</div>
+      </div>
+    </header>
+
+    <div class="kpi-strip">
+      <div class="kpi-glob" data-c="planned"><div class="label">Day plan</div><div class="val" id="hdr-day-plan">--</div><div class="sub" id="hdr-day-plan-by-now">by now: --</div></div>
+      <div class="kpi-glob" data-c="produced"><div class="label">Produced</div><div class="val" id="hdr-produced">--</div><div class="sub">day cumul.</div></div>
+      <div class="kpi-glob" data-c="delta"><div class="label">Δ vs expected</div><div class="val" id="hdr-delta">--</div><div class="sub" id="hdr-delta-status">--</div></div>
+      <div class="kpi-glob" data-c="coverage"><div class="label">Day coverage</div><div class="val" id="hdr-coverage">--</div><div class="sub">target ≥95%</div></div>
+    </div>
+
+    <div id="pages"></div>
+
+    <div class="nav-bar">
+      <div class="nav-controls">
+        <button class="nav-btn icon" id="btn-prev" title="Previous page">◀</button>
+        <button class="nav-btn icon" id="btn-pause" title="Pause rotation">⏸</button>
+        <button class="nav-btn icon" id="btn-next" title="Next page">▶</button>
+        <select class="nav-select" id="page-select" title="Go to page"></select>
+      </div>
+      <div class="nav-dots" id="nav-dots"></div>
+      <div class="nav-status">
+        <span id="nav-status-text">page 1 / 1 · auto in --s</span>
+        <div class="timer-bar"><div id="timer-fill" class="fill"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.MONITORED_PHASES = {{ monitored_phases | tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='js/charts.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/rotation.js') }}"></script>
+</body>
+</html>
