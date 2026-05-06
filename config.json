@@ -9,7 +9,8 @@
       "CONFORMAL COATING": "COATING",
       "PTHM SELECTIVE":    "PTHSEL",
       "SUDURA SELECTIVA":  "PTHSEL",
-      "PROGRAMARE":        "PROGRAMING"
+      "PROGRAMARE":        "PROGRAMING",
+      "AOI":               "SMT"
     }
   },
   "data_sources": {
