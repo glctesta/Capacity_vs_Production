@@ -4,8 +4,67 @@ from engine.cycle_engine import (
     minutes_to_hours,
     compute_planned_minutes_by_phase,
     compute_produced_minutes_by_phase_shift,
+    strip_revision_suffix,
 )
 from engine.models import PlanRow
+
+
+def test_strip_revision_dash_nn():
+    assert strip_revision_suffix("1547-5038-01") == "1547-5038"
+    assert strip_revision_suffix("1146-6058-18") == "1146-6058"
+    assert strip_revision_suffix("1146-6048-19") == "1146-6048"
+
+
+def test_strip_revision_pipe_n():
+    assert strip_revision_suffix("PFEX+673612A02|1") == "PFEX+673612A02"
+    assert strip_revision_suffix("PFSL+KCE-FCB21|1") == "PFSL+KCE-FCB21"
+
+
+def test_strip_revision_pipe_then_dash():
+    """Should strip both: '|' first, then '-NN'."""
+    assert strip_revision_suffix("FOO-BAR-12|3") == "FOO-BAR"
+
+
+def test_strip_revision_no_change_for_two_segments():
+    """1146-4018 must NOT be stripped to '1146' — that would be wrong."""
+    assert strip_revision_suffix("1146-4018") == "1146-4018"
+    assert strip_revision_suffix("1547-5038") == "1547-5038"
+
+
+def test_strip_revision_no_change_when_last_segment_is_long():
+    """1146-6058-1234 stays — last segment is 4 digits, not a revision."""
+    assert strip_revision_suffix("1146-6058-1234") == "1146-6058-1234"
+
+
+def test_strip_revision_empty_safe():
+    assert strip_revision_suffix("") == ""
+    assert strip_revision_suffix("X") == "X"
+
+
+def test_planned_minutes_uses_revision_fallback():
+    """Plan has product '1547-5038-01' but routing has '1547-5038' — must match."""
+    plan = [PlanRow("ORD1", "ASSEMBLY", "1547-5038-01", date(2026, 5, 6), 100)]
+    cycles = {("1547-5038", "ASSEMBLY"): 6.0}  # routing has stripped form
+    result = compute_planned_minutes_by_phase(plan, cycles)
+    assert result == {"ASSEMBLY": 600.0}
+
+
+def test_planned_minutes_uses_pipe_fallback():
+    plan = [PlanRow("ORD1", "ASSEMBLY", "PFEX+673612A02|1", date(2026, 5, 6), 50)]
+    cycles = {("PFEX+673612A02", "ASSEMBLY"): 4.0}
+    result = compute_planned_minutes_by_phase(plan, cycles)
+    assert result == {"ASSEMBLY": 200.0}
+
+
+def test_planned_minutes_exact_match_takes_precedence():
+    """If an exact-match key exists, it wins over the stripped form."""
+    plan = [PlanRow("ORD1", "ASSEMBLY", "1547-5038-01", date(2026, 5, 6), 100)]
+    cycles = {
+        ("1547-5038-01", "ASSEMBLY"): 7.0,  # exact match
+        ("1547-5038",    "ASSEMBLY"): 6.0,  # fallback
+    }
+    result = compute_planned_minutes_by_phase(plan, cycles)
+    assert result == {"ASSEMBLY": 700.0}  # used exact, not fallback
 
 
 def test_minutes_to_hours_2_decimals():
