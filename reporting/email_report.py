@@ -1,16 +1,12 @@
 # reporting/email_report.py
 """Daily email report. HTML + plain text. Reuses email_connector from PlanRespect."""
-import json
 import logging
-import os
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Dict, Tuple
 
 from data_cache import DataCache
 from data_sources.db_queries import get_email_recipients
 from engine.models import DayPoint, RollingData
-from engine.rolling_engine import compute_rolling_month, load_daily_history
 from engine.shift_engine import operative_day
 
 logger = logging.getLogger("PianoTempi")
@@ -119,7 +115,7 @@ def generate_html_body(
 
 def send_daily(cache: DataCache, conn) -> None:
     """Send the daily report. Skips if today's weekday is in skip_weekdays
-    or if recipients are empty."""
+    or if recipients are empty. Reads from SQL history tables."""
     cfg = cache.config.email_report
     if not cfg.enabled:
         logger.info("email report disabled in config")
@@ -134,48 +130,77 @@ def send_daily(cache: DataCache, conn) -> None:
 
     yesterday_date = operative_day(datetime.now()) - timedelta(days=1)
 
-    history_path = os.path.join("data", f"daily_history_{yesterday_date.year}.json")
-    history = load_daily_history(history_path)
-    yesterday_dp = next((d for d in history if d.date == yesterday_date), None)
-    if yesterday_dp is None:
-        logger.error("no daily history entry for %s -- email skipped", yesterday_date)
+    from data_sources.db_history import (
+        get_plan_history_for_date, get_prod_history_for_date,
+        get_history_aggregates,
+    )
+    plan_rows = get_plan_history_for_date(conn, yesterday_date)
+    prod_rows = get_prod_history_for_date(conn, yesterday_date)
+    if not plan_rows and not prod_rows:
+        logger.error("no SQL history for %s -- email skipped", yesterday_date)
         return
 
-    # Per-phase breakdown from the JSON file
+    # Aggregate per phase
     per_phase: Dict[str, Tuple[float, float]] = {}
-    try:
-        raw = json.loads(Path(history_path).read_text(encoding="utf-8"))
-        for d in raw["days"]:
-            if d["date"] == yesterday_date.isoformat():
-                for phase, vals in d.get("phases", {}).items():
-                    per_phase[phase] = (vals["planned_h"], vals["produced_h"])
-                break
-    except (json.JSONDecodeError, OSError, KeyError) as e:
-        logger.error("could not extract per-phase breakdown: %s", e)
+    plan_total = prod_total = 0.0
+    for r in plan_rows:
+        p = r["phase_name"]
+        cur = per_phase.get(p, (0.0, 0.0))
+        per_phase[p] = (cur[0] + float(r.get("planned_hours") or 0.0), cur[1])
+        plan_total += float(r.get("planned_hours") or 0.0)
+    for r in prod_rows:
+        p = r["phase_name"]
+        cur = per_phase.get(p, (0.0, 0.0))
+        per_phase[p] = (cur[0], cur[1] + float(r.get("produced_hours") or 0.0))
+        prod_total += float(r.get("produced_hours") or 0.0)
+    coverage = round(prod_total / plan_total * 100.0, 2) if plan_total > 0 else 0.0
+    yesterday_dp = DayPoint(
+        date=yesterday_date,
+        planned_h=round(plan_total, 2),
+        produced_h=round(prod_total, 2),
+        coverage_pct=coverage,
+    )
 
-    rolling = compute_rolling_month(today=yesterday_date + timedelta(days=1),
-                                    history=history)
+    # Month-to-date and YTD
+    month_start = yesterday_date.replace(day=1)
+    year_start = yesterday_date.replace(month=1, day=1)
+    mtd_days = get_history_aggregates(conn, month_start, yesterday_date)
+    ytd_days = get_history_aggregates(conn, year_start, yesterday_date)
+
+    def _rd_totals(days):
+        plan = round(sum(d["planned_h"] for d in days), 2)
+        prod = round(sum(d["produced_h"] for d in days), 2)
+        cov = round(prod / plan * 100.0, 2) if plan > 0 else 0.0
+        wdays = len([d for d in days if d["planned_h"] > 0])
+        return plan, prod, cov, wdays
+
+    m_plan, m_prod, m_cov, m_wdays = _rd_totals(mtd_days)
+    y_plan, y_prod, y_cov, y_wdays = _rd_totals(ytd_days)
+
+    rolling = RollingData(
+        days=[],
+        month_planned_h=m_plan, month_produced_h=m_prod, month_coverage_pct=m_cov,
+        ytd_planned_h=y_plan, ytd_produced_h=y_prod, ytd_coverage_pct=y_cov,
+        working_days_month=m_wdays, working_days_ytd=y_wdays,
+    )
 
     rcpts = get_email_recipients(conn)
     if not rcpts:
-        logger.error("no email recipients configured (settings.Sys_email_efficienze) -- skipped")
+        logger.error("no email recipients (settings.Sys_email_efficienze) -- skipped")
         return
 
     subject = generate_subject(cfg.subject_prefix, yesterday_date, yesterday_dp.coverage_pct)
     plain = generate_plain_body(yesterday_dp, per_phase, rolling)
     html = generate_html_body(yesterday_dp, per_phase, rolling)
 
-    # Send via PlanRespect's email_connector. The signature may vary; adapt as needed.
     try:
-        from email_connector import EmailSender
-        ec = EmailSender()
-        # Try common signatures; fall back gracefully
+        from email_connector import EmailConnector
+        ec = EmailConnector()
         try:
             ec.send_email(to=rcpts, subject=subject, body_plain=plain, body_html=html)
         except TypeError:
-            # Fallback: maybe the connector takes different kwargs
             for r in rcpts:
-                ec.send_email(r, subject, html, is_html=True)
+                ec.send_email(r, subject, html)
         logger.info("email report sent to %d recipients", len(rcpts))
     except Exception as e:
         logger.error("email send failed: %s", e)

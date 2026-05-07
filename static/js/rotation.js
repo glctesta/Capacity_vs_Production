@@ -33,6 +33,22 @@ function buildSelectAndDots() {
   document.getElementById("btn-prev").addEventListener("click", () => goTo((currentIdx - 1 + pages.length) % pages.length, true));
   document.getElementById("btn-next").addEventListener("click", () => goTo((currentIdx + 1) % pages.length, true));
   document.getElementById("btn-pause").addEventListener("click", togglePause);
+
+  // Export button
+  const exportBtn = document.getElementById("btn-export");
+  const exportDate = document.getElementById("export-date");
+  if (exportBtn && exportDate) {
+    // Default the date input to today
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
+    exportDate.value = `${yyyy}-${mm}-${dd}`;
+    exportBtn.addEventListener("click", () => {
+      const d = exportDate.value || `${yyyy}-${mm}-${dd}`;
+      window.location.href = `/api/export?date=${encodeURIComponent(d)}`;
+    });
+  }
 }
 
 function goTo(idx, manual) {

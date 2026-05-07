@@ -9,6 +9,7 @@ from data_sources.db_history import (
     get_plan_history_for_date,
     get_prod_history_for_date,
     get_cycles_master,
+    get_history_aggregates,
 )
 from engine.models import PlanRow
 
@@ -117,3 +118,23 @@ def test_get_cycles_master_returns_dicts():
     assert len(rows) == 1
     assert rows[0]["product_code"] == "P1"
     assert rows[0]["cycle_time_minutes"] == 2.5
+
+
+def test_get_history_aggregates_combines_plan_and_prod():
+    """Two day rows from PlanHistory + one matching from ProdHistory aggregate cleanly."""
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        (date(2026, 5, 5), 100.0, 0.0),  # plan-only row
+        (date(2026, 5, 6), 200.0, 0.0),  # plan-only row
+        (date(2026, 5, 5), 0.0, 90.0),   # prod-only row, same date as first plan
+    ]
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    out = get_history_aggregates(conn, date(2026, 5, 1), date(2026, 5, 6))
+    assert len(out) == 2
+    # day 5 should be merged: plan=100, prod=90
+    by_date = {r["date"]: r for r in out}
+    assert by_date[date(2026, 5, 5)]["planned_h"] == 100.0
+    assert by_date[date(2026, 5, 5)]["produced_h"] == 90.0
+    assert by_date[date(2026, 5, 6)]["planned_h"] == 200.0
+    assert by_date[date(2026, 5, 6)]["produced_h"] == 0.0

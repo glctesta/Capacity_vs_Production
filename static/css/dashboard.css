@@ -51,6 +51,8 @@ body { background: #0a0a0a; color: #eee; font-family: system-ui, -apple-system, 
 .nav-btn { background: #141414; color: #ddd; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px 14px; font-size: 16px; font-weight: 600; cursor: pointer; min-width: 40px; }
 .nav-btn:hover { background: #1f1f1f; border-color: #444; color: #fff; }
 .nav-select { background: #141414; color: #fff; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px 14px; font-size: 14px; min-width: 280px; }
+.nav-date { background: #141414; color: #fff; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
+.nav-date:focus { outline: none; border-color: #3880ff; }
 .nav-dots { text-align: center; }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #333; margin: 0 5px; vertical-align: middle; cursor: pointer; }
 .dot.act { background: #2dd36f; width: 28px; border-radius: 5px; }

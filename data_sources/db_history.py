@@ -268,3 +268,36 @@ def get_cycles_master(conn) -> List[Dict]:
     rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
     cursor.close()
     return rows
+
+
+def get_history_aggregates(conn, start_date: date, end_date: date) -> List[Dict]:
+    """Aggregate plan + prod hours per day across [start_date, end_date].
+    Returns list of {'date', 'planned_h', 'produced_h', 'coverage_pct'}."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT PlanDate AS d, SUM(PlannedHours) AS plan_h, 0.0 AS prod_h
+        FROM traceability_rs.dbo.PianoTempi_PlanHistory
+        WHERE PlanDate BETWEEN ? AND ?
+        GROUP BY PlanDate
+        UNION ALL
+        SELECT ProdDate AS d, 0.0 AS plan_h, SUM(ProducedHours) AS prod_h
+        FROM traceability_rs.dbo.PianoTempi_ProdHistory
+        WHERE ProdDate BETWEEN ? AND ?
+        GROUP BY ProdDate
+    """, start_date, end_date, start_date, end_date)
+    by_day: Dict[date, Dict[str, float]] = {}
+    for row in cursor.fetchall():
+        d = row[0]
+        if d is None:
+            continue
+        agg = by_day.setdefault(d, {"plan": 0.0, "prod": 0.0})
+        agg["plan"] += float(row[1] or 0.0)
+        agg["prod"] += float(row[2] or 0.0)
+    cursor.close()
+    out = []
+    for d in sorted(by_day.keys()):
+        plan = round(by_day[d]["plan"], 2)
+        prod = round(by_day[d]["prod"], 2)
+        cov = round(prod / plan * 100.0, 2) if plan > 0 else 0.0
+        out.append({"date": d, "planned_h": plan, "produced_h": prod, "coverage_pct": cov})
+    return out

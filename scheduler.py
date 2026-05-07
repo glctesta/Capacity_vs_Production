@@ -1,9 +1,9 @@
 # scheduler.py
-"""APScheduler with 5 jobs: refresh_routing, refresh_planning, refresh_production,
-daily_history_commit, daily_email_report."""
+"""APScheduler with 4 jobs: refresh_routing, refresh_planning, refresh_production,
+daily_email_report."""
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -16,7 +16,7 @@ logger = logging.getLogger("PianoTempi")
 
 
 def build_scheduler(cache: DataCache, config: AppConfig, conn_factory) -> BackgroundScheduler:
-    """Create and return the BackgroundScheduler with all 5 jobs registered.
+    """Create and return the BackgroundScheduler with all 4 jobs registered.
 
     `conn_factory`: zero-arg callable that returns a context-manager DB connection
     (e.g. `lambda: DatabaseConnection(ConfigManager())`).
@@ -45,24 +45,6 @@ def build_scheduler(cache: DataCache, config: AppConfig, conn_factory) -> Backgr
         except Exception as e:
             logger.error("refresh_production failed: %s", e)
 
-    def _job_daily_history():
-        try:
-            from engine.rolling_engine import save_day_to_history
-            from engine.shift_engine import operative_day
-            now = datetime.now()
-            # The day that just closed is operative_day - 1 day (we run at 07:30:30,
-            # so operative_day(now) is "today", but the day we just closed is yesterday).
-            yesterday = operative_day(now) - timedelta(days=1)
-            phases = {
-                k: {"planned_h": v.planned_h_day, "produced_h": v.produced_h_day}
-                for k, v in cache.phase_kpis.items()
-            }
-            path = os.path.join("data", f"daily_history_{yesterday.year}.json")
-            save_day_to_history(path, day=yesterday, phases=phases)
-            logger.info("daily history committed for %s", yesterday)
-        except Exception as e:
-            logger.error("daily_history_commit failed: %s", e)
-
     def _job_email():
         try:
             from reporting.email_report import send_daily
@@ -81,10 +63,6 @@ def build_scheduler(cache: DataCache, config: AppConfig, conn_factory) -> Backgr
     sched.add_job(_job_production,
                   IntervalTrigger(seconds=config.refresh.production_seconds),
                   id="refresh_production", coalesce=True, max_instances=1)
-    # Daily history commit at 07:30:30 (just before email at 07:31)
-    sched.add_job(_job_daily_history,
-                  CronTrigger(hour=7, minute=30, second=30),
-                  id="daily_history_commit", coalesce=True, max_instances=1)
     eh, em = config.email_report.send_at.split(":")
     sched.add_job(_job_email,
                   CronTrigger(hour=int(eh), minute=int(em)),

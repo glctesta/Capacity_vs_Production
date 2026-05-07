@@ -10,6 +10,8 @@ from flask import Flask, jsonify, render_template
 
 from data_cache import DataCache
 
+logger = logging.getLogger("PianoTempi")
+
 
 def setup_logging() -> logging.Logger:
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -123,6 +125,37 @@ def build_flask_app(cache: DataCache) -> Flask:
                 "working_days_month": r.working_days_month,
                 "working_days_ytd": r.working_days_ytd,
             })
+
+    @app.route("/api/export")
+    def export_excel():
+        from datetime import date as _date
+        from flask import request, send_file, abort
+        from io import BytesIO
+
+        date_str = request.args.get("date")
+        try:
+            if date_str:
+                target_date = _date.fromisoformat(date_str)
+            else:
+                from engine.shift_engine import operative_day as _op_day
+                target_date = _op_day(datetime.now())
+        except ValueError:
+            abort(400, description="Invalid date format. Use YYYY-MM-DD.")
+
+        try:
+            from reporting.excel_export import build_excel_for_date
+            with conn_factory() as conn:
+                xlsx_bytes = build_excel_for_date(conn, target_date)
+        except Exception as e:
+            logger.error("Excel export failed for %s: %s", target_date, e)
+            abort(500, description=f"Export failed: {e}")
+
+        filename = f"PianoTempi_export_{target_date.isoformat()}.xlsx"
+        return send_file(
+            BytesIO(xlsx_bytes),
+            as_attachment=True, download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     return app
 
