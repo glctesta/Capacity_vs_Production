@@ -53,6 +53,14 @@ def build_scheduler(cache: DataCache, config: AppConfig, conn_factory) -> Backgr
         except Exception as e:
             logger.error("daily_email_report failed: %s", e)
 
+    def _job_anomaly_alert():
+        try:
+            from reporting.email_anomalies import send_anomaly_alert
+            with conn_factory() as conn:
+                send_anomaly_alert(cache, conn)
+        except Exception as e:
+            logger.error("anomaly_alert failed: %s", e)
+
     routing_at = config.refresh.routing_daily_at  # "07:00"
     rh, rm = routing_at.split(":")
     sched.add_job(_job_routing, CronTrigger(hour=int(rh), minute=int(rm)),
@@ -67,6 +75,17 @@ def build_scheduler(cache: DataCache, config: AppConfig, conn_factory) -> Backgr
     sched.add_job(_job_email,
                   CronTrigger(hour=int(eh), minute=int(em)),
                   id="daily_email_report", coalesce=True, max_instances=1)
+    # Shift-start anomaly alerts: 07:32, 15:31, 23:31
+    # (07:32 avoids collision with daily_email_report at 07:31)
+    sched.add_job(_job_anomaly_alert,
+                  CronTrigger(hour=7, minute=32),
+                  id="anomaly_alert_t1", coalesce=True, max_instances=1)
+    sched.add_job(_job_anomaly_alert,
+                  CronTrigger(hour=15, minute=31),
+                  id="anomaly_alert_t2", coalesce=True, max_instances=1)
+    sched.add_job(_job_anomaly_alert,
+                  CronTrigger(hour=23, minute=31),
+                  id="anomaly_alert_t3", coalesce=True, max_instances=1)
     return sched
 
 

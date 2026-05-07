@@ -84,10 +84,11 @@ def test_refresh_routing_canonicalizes_cycles_and_builds_multi_id_mapping(
     assert c.phase_mapping["FCT"] == [103]
 
 
+@patch("data_cache.replace_anomalies_for_date")
 @patch("data_cache.upsert_plan_history")
 @patch("data_cache.load_today_plan")
 @patch("data_cache.resolve_orders_to_products")
-def test_refresh_planning_canonicalizes_phase_names(mock_resolve, mock_load, mock_upsert_plan):
+def test_refresh_planning_canonicalizes_phase_names(mock_resolve, mock_load, mock_upsert_plan, mock_anom):
     """Plan rows arrive with raw planning names; after refresh, all are canonical."""
     from datetime import date
     from engine.models import PlanRow

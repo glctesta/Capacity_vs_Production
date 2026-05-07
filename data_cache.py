@@ -7,7 +7,9 @@ from typing import Dict, List, Optional, Tuple
 from app_config import AppConfig
 from data_sources.db_history import (
     upsert_cycles, upsert_plan_history, upsert_prod_history,
+    replace_anomalies_for_date,
 )
+from engine.anomaly_detector import detect_anomalies
 from data_sources.db_queries import (
     get_phase_mapping,
     get_production_by_phase_in_window,
@@ -55,6 +57,8 @@ class DataCache:
         self.phase_kpis: Dict[str, PhaseKPI] = {}
         self.total_kpi: Optional[TotalKPI] = None
         self.rolling_data: Optional[RollingData] = None
+        # Raw planning phase names (pre-alias) of last refresh — used for anomaly detection
+        self.raw_planning_phase_names: List[str] = []
         # bookkeeping
         self.last_refresh_ts: Dict[str, datetime] = {}
 
@@ -111,6 +115,8 @@ class DataCache:
                 self.config.data_sources.planning_sheet,
                 target_date=today, conn=conn,
             )
+            # Capture raw phase names before canonicalization (for anomaly detection)
+            self.raw_planning_phase_names = [r.phase_name for r in raw_plan]
             # Canonicalize phase_name on each row
             canonicalized: List[PlanRow] = []
             translation_summary: Dict[str, str] = {}
@@ -142,6 +148,19 @@ class DataCache:
             self.order_to_product = {k: v[1] for k, v in resolved.items()}
             self.order_to_id = {k: v[0] for k, v in resolved.items()}
             self.last_refresh_ts["planning"] = datetime.now()
+
+            try:
+                anomalies = detect_anomalies(
+                    plan_rows=self.today_plan,
+                    cycles=self.routing_cycles,
+                    order_to_product=self.order_to_product,
+                    aliases=self.config.phases.aliases,
+                    raw_planning_phase_names=self.raw_planning_phase_names,
+                )
+                replace_anomalies_for_date(conn, today, anomalies)
+                logger.info("anomalies snapshot for %s: %d entries", today, len(anomalies))
+            except Exception as e:
+                logger.error("anomaly snapshot failed: %s", e)
 
     def refresh_production(self, conn) -> None:
         """Query production for ALL orders (not just today's plan) per monitored phase

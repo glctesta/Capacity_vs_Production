@@ -25,8 +25,8 @@ def _conn_with_rows(rows):
 def test_create_pianotempi_tables_runs_idempotent_ddl():
     conn, cursor = _conn_with_rows([])
     create_pianotempi_tables(conn)
-    # 5 DDL statements (3 CREATE TABLE + 2 CREATE INDEX)
-    assert cursor.execute.call_count == 5
+    # 4 CREATE TABLE + 3 CREATE INDEX = 7 calls
+    assert cursor.execute.call_count == 7
 
 
 def test_upsert_cycles_deletes_then_inserts():
@@ -118,6 +118,41 @@ def test_get_cycles_master_returns_dicts():
     assert len(rows) == 1
     assert rows[0]["product_code"] == "P1"
     assert rows[0]["cycle_time_minutes"] == 2.5
+
+
+def test_replace_anomalies_deletes_then_inserts():
+    from datetime import date
+    from data_sources.db_history import replace_anomalies_for_date
+    from engine.anomaly_detector import Anomaly
+    conn, cursor = _conn_with_rows([])
+    anomalies = [
+        Anomaly("missing_cycle", "ORD1", "ASSEMBLY", "P1", "no cycle"),
+        Anomaly("unresolved_order", "ORD2", "FCT", "", "order not found"),
+    ]
+    replace_anomalies_for_date(conn, date(2026, 5, 7), anomalies)
+    # 1 delete + 2 inserts
+    assert cursor.execute.call_count == 3
+
+
+def test_replace_anomalies_empty_just_clears():
+    from datetime import date
+    from data_sources.db_history import replace_anomalies_for_date
+    conn, cursor = _conn_with_rows([])
+    replace_anomalies_for_date(conn, date(2026, 5, 7), [])
+    # 1 delete only (no inserts)
+    assert cursor.execute.call_count == 1
+
+
+def test_get_anomalies_for_date_returns_dicts():
+    from datetime import date, datetime
+    from data_sources.db_history import get_anomalies_for_date
+    conn, cursor = _conn_with_rows([
+        ("missing_cycle", "ORD1", "ASSEMBLY", "P1", "no cycle", datetime(2026, 5, 7, 8, 0)),
+    ])
+    out = get_anomalies_for_date(conn, date(2026, 5, 7))
+    assert len(out) == 1
+    assert out[0]["category"] == "missing_cycle"
+    assert out[0]["order_number"] == "ORD1"
 
 
 def test_get_history_aggregates_combines_plan_and_prod():

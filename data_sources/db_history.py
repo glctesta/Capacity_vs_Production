@@ -5,6 +5,7 @@ Tables (created automatically on first connect via create_pianotempi_tables):
   - traceability_rs.dbo.PianoTempi_Cycles       master cycle times
   - traceability_rs.dbo.PianoTempi_PlanHistory  daily snapshot of planning
   - traceability_rs.dbo.PianoTempi_ProdHistory  daily snapshot of production
+  - traceability_rs.dbo.PianoTempi_Anomalies    open anomalies per operative day
 
 All UPSERTs use the simple "delete-scope + insert" pattern (no MERGE).
 """
@@ -23,7 +24,7 @@ logger = logging.getLogger("PianoTempi")
 # ----------------------------------------------------------------------
 
 def create_pianotempi_tables(conn) -> None:
-    """Create the 3 history tables if they don't exist. Idempotent.
+    """Create the 4 history tables if they don't exist. Idempotent.
     Called once at app startup."""
     cursor = conn.cursor()
     try:
@@ -88,6 +89,28 @@ def create_pianotempi_tables(conn) -> None:
             )
             CREATE INDEX IX_PianoTempi_ProdHistory_Date
                 ON traceability_rs.dbo.PianoTempi_ProdHistory (ProdDate)
+        """)
+        cursor.execute("""
+            IF OBJECT_ID('traceability_rs.dbo.PianoTempi_Anomalies', 'U') IS NULL
+            CREATE TABLE traceability_rs.dbo.PianoTempi_Anomalies (
+                Id           INT IDENTITY(1,1) PRIMARY KEY,
+                AnomalyDate  DATE NOT NULL,
+                Category     NVARCHAR(50) NOT NULL,
+                OrderNumber  NVARCHAR(100),
+                PhaseName    NVARCHAR(100),
+                ProductCode  NVARCHAR(100),
+                Detail       NVARCHAR(500),
+                DetectedAt   DATETIME DEFAULT GETDATE()
+            )
+        """)
+        cursor.execute("""
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_PianoTempi_Anomalies_Date'
+                  AND object_id = OBJECT_ID('traceability_rs.dbo.PianoTempi_Anomalies')
+            )
+            CREATE INDEX IX_PianoTempi_Anomalies_Date
+                ON traceability_rs.dbo.PianoTempi_Anomalies (AnomalyDate, Category)
         """)
         cursor.close()
         logger.info("PianoTempi_* tables verified/created")
@@ -265,6 +288,46 @@ def get_cycles_master(conn) -> List[Dict]:
         ORDER BY ProductCode, PhaseName
     """)
     cols = ["product_code", "phase_name", "cycle_time_minutes", "source_file", "updated_at"]
+    rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+    cursor.close()
+    return rows
+
+
+def replace_anomalies_for_date(conn, anomaly_date: date, anomalies) -> None:
+    """Replace today's anomalies snapshot. Strategy: DELETE WHERE AnomalyDate=...
+    then INSERT all current. Past dates untouched.
+
+    `anomalies` is a list of engine.anomaly_detector.Anomaly instances."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "DELETE FROM traceability_rs.dbo.PianoTempi_Anomalies WHERE AnomalyDate = ?",
+            anomaly_date,
+        )
+        for a in anomalies:
+            cursor.execute("""
+                INSERT INTO traceability_rs.dbo.PianoTempi_Anomalies
+                    (AnomalyDate, Category, OrderNumber, PhaseName,
+                     ProductCode, Detail, DetectedAt)
+                VALUES (?, ?, ?, ?, ?, ?, GETDATE())
+            """,
+                anomaly_date, a.category, a.order_number, a.phase_name,
+                a.product_code, a.detail,
+            )
+        cursor.close()
+    except Exception as e:
+        logger.error("replace_anomalies_for_date failed: %s", e)
+
+
+def get_anomalies_for_date(conn, anomaly_date: date) -> List[Dict]:
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT Category, OrderNumber, PhaseName, ProductCode, Detail, DetectedAt
+        FROM traceability_rs.dbo.PianoTempi_Anomalies
+        WHERE AnomalyDate = ?
+        ORDER BY Category, PhaseName, OrderNumber
+    """, anomaly_date)
+    cols = ["category", "order_number", "phase_name", "product_code", "detail", "detected_at"]
     rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
     cursor.close()
     return rows
