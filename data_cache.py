@@ -5,6 +5,9 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from app_config import AppConfig
+from data_sources.db_history import (
+    upsert_cycles, upsert_plan_history, upsert_prod_history,
+)
 from data_sources.db_queries import (
     get_phase_mapping,
     get_production_by_phase_in_window,
@@ -75,6 +78,11 @@ class DataCache:
             self.routing_source_mtime = mtime
 
             try:
+                upsert_cycles(conn, cycles_canon, src or "")
+            except Exception as e:
+                logger.error("upsert_cycles wrap failed: %s", e)
+
+            try:
                 mapping_rows = get_phase_mapping(conn)
                 # Build canonical -> [traceability_phase_id, ...]
                 canon_to_ids: Dict[str, List[int]] = {}
@@ -123,6 +131,11 @@ class DataCache:
                 )
             self.today_plan = canonicalized
             logger.info("today_plan: %d rows after alias normalization", len(canonicalized))
+
+            try:
+                upsert_plan_history(conn, today, canonicalized, self.routing_cycles)
+            except Exception as e:
+                logger.error("upsert_plan_history wrap failed: %s", e)
 
             order_numbers = {r.order_number for r in canonicalized}
             resolved = resolve_orders_to_products(conn, order_numbers)
@@ -206,6 +219,15 @@ class DataCache:
                 kpis[phase_name] = kpi
             self.phase_kpis = kpis
             self.total_kpi = self._build_total_kpi(kpis)
+
+            try:
+                upsert_prod_history(
+                    conn, op_day, produced,
+                    self.order_to_product, self.routing_cycles, self.phase_mapping,
+                )
+            except Exception as e:
+                logger.error("upsert_prod_history wrap failed: %s", e)
+
             self.last_refresh_ts["production"] = datetime.now()
 
     def _build_total_kpi(self, kpis: Dict[str, PhaseKPI]) -> TotalKPI:

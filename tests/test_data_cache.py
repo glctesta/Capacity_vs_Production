@@ -55,10 +55,11 @@ def test_data_cache_lock_returns_context_manager():
         pass
 
 
+@patch("data_cache.upsert_cycles")
 @patch("data_cache.load_latest_routing")
 @patch("data_cache.get_phase_mapping")
 def test_refresh_routing_canonicalizes_cycles_and_builds_multi_id_mapping(
-    mock_mapping, mock_load,
+    mock_mapping, mock_load, mock_upsert_cycles,
 ):
     """Cycle keys are canonicalized; phase_mapping is canonical -> [trace_ids]."""
     mock_load.return_value = (
@@ -83,9 +84,10 @@ def test_refresh_routing_canonicalizes_cycles_and_builds_multi_id_mapping(
     assert c.phase_mapping["FCT"] == [103]
 
 
+@patch("data_cache.upsert_plan_history")
 @patch("data_cache.load_today_plan")
 @patch("data_cache.resolve_orders_to_products")
-def test_refresh_planning_canonicalizes_phase_names(mock_resolve, mock_load):
+def test_refresh_planning_canonicalizes_phase_names(mock_resolve, mock_load, mock_upsert_plan):
     """Plan rows arrive with raw planning names; after refresh, all are canonical."""
     from datetime import date
     from engine.models import PlanRow
@@ -108,8 +110,9 @@ def test_refresh_planning_canonicalizes_phase_names(mock_resolve, mock_load):
     assert "planning" in c.last_refresh_ts
 
 
+@patch("data_cache.upsert_prod_history")
 @patch("data_cache.get_production_by_phase_in_window")
-def test_refresh_production_sums_across_multi_id_mapping(mock_prod):
+def test_refresh_production_sums_across_multi_id_mapping(mock_prod, mock_upsert_prod):
     """If a canonical phase maps to multiple trace_ids, production is summed
     across all of them."""
     from datetime import date
@@ -133,8 +136,9 @@ def test_refresh_production_sums_across_multi_id_mapping(mock_prod):
     assert "production" in c.last_refresh_ts
 
 
+@patch("data_cache.upsert_prod_history")
 @patch("data_cache.get_production_by_phase_in_window")
-def test_refresh_production_planned_visible_without_mapping(mock_prod):
+def test_refresh_production_planned_visible_without_mapping(mock_prod, mock_upsert_prod):
     """A canonical phase with NO traceability mapping still shows planned hours
     (produced stays 0). Critical for phases like COATING where the planning
     has rows but the mapping table has no Planning_PhaseName=CONFORMAL COATING."""
@@ -155,9 +159,10 @@ def test_refresh_production_planned_visible_without_mapping(mock_prod):
     mock_prod.assert_not_called()
 
 
+@patch("data_cache.upsert_prod_history")
 @patch("data_cache.get_production_by_phase_in_window")
 @patch("data_cache.resolve_orders_to_products")
-def test_refresh_production_includes_out_of_plan_orders(mock_resolve, mock_prod):
+def test_refresh_production_includes_out_of_plan_orders(mock_resolve, mock_prod, mock_upsert_prod):
     """If an order is producing on SMT but not in today's plan, it must still
     appear in the SMT KPI. The out-of-plan order gets resolved to its product
     so its hours can be computed via cycle_time × qty."""

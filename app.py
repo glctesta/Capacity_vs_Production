@@ -152,6 +152,11 @@ def main():
     logger.info("initial data load...")
     try:
         with conn_factory() as conn:
+            from data_sources.db_history import create_pianotempi_tables
+            try:
+                create_pianotempi_tables(conn)
+            except Exception as e:
+                logger.error("create_pianotempi_tables failed at startup: %s", e)
             try:
                 cache.refresh_routing(conn)
             except Exception as e:
