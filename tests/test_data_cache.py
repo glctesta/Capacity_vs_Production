@@ -160,6 +160,57 @@ def test_refresh_production_planned_visible_without_mapping(mock_prod, mock_upse
     mock_prod.assert_not_called()
 
 
+@patch("data_cache.get_history_aggregates")
+def test_refresh_rolling_populates_cache_from_sql_history(mock_agg):
+    """refresh_rolling must read SQL history aggregates and store a RollingData
+    in cache.rolling_data. Today is excluded; only past days contribute to MTD/YTD."""
+    from datetime import date, datetime
+    c = DataCache(_cfg())
+    # Today is 2026-05-13. Year-to-date should include 2026-04-30 (April, YTD only)
+    # plus 2026-05-06, 2026-05-12 (May, both MTD and YTD).
+    # Today itself (2026-05-13) is filtered out by compute_rolling_month.
+    mock_agg.return_value = [
+        {"date": date(2026, 4, 30), "planned_h": 100.0, "produced_h": 90.0, "coverage_pct": 90.0},
+        {"date": date(2026, 5, 6),  "planned_h": 128.5, "produced_h": 120.0, "coverage_pct": 93.39},
+        {"date": date(2026, 5, 12), "planned_h": 150.0, "produced_h": 140.0, "coverage_pct": 93.33},
+        {"date": date(2026, 5, 13), "planned_h": 200.0, "produced_h": 10.0,  "coverage_pct": 5.0},
+    ]
+    c.refresh_rolling(conn=MagicMock(), now=datetime(2026, 5, 13, 10, 0))
+    rd = c.rolling_data
+    assert rd is not None
+    # Month-to-date: only May days strictly before 2026-05-13
+    assert rd.month_planned_h == 278.5      # 128.5 + 150
+    assert rd.month_produced_h == 260.0     # 120 + 140
+    assert rd.working_days_month == 2
+    # Year-to-date: all days strictly before 2026-05-13
+    assert rd.ytd_planned_h == 378.5        # 100 + 128.5 + 150
+    assert rd.ytd_produced_h == 350.0       # 90 + 120 + 140
+    assert rd.working_days_ytd == 3
+    # `days` contains the day-by-day current-month series for the chart
+    assert len(rd.days) == 2
+    assert rd.days[0].date == date(2026, 5, 6)
+    assert rd.days[1].date == date(2026, 5, 12)
+    # Bookkeeping
+    assert "rolling" in c.last_refresh_ts
+
+
+@patch("data_cache.get_history_aggregates")
+def test_refresh_rolling_handles_empty_history(mock_agg):
+    """No SQL history yet: rolling_data is set with all zeros, never None."""
+    from datetime import datetime
+    c = DataCache(_cfg())
+    mock_agg.return_value = []
+    c.refresh_rolling(conn=MagicMock(), now=datetime(2026, 5, 13, 10, 0))
+    rd = c.rolling_data
+    assert rd is not None
+    assert rd.month_planned_h == 0.0
+    assert rd.month_produced_h == 0.0
+    assert rd.month_coverage_pct == 0.0
+    assert rd.ytd_planned_h == 0.0
+    assert rd.working_days_month == 0
+    assert rd.working_days_ytd == 0
+
+
 @patch("data_cache.upsert_prod_history")
 @patch("data_cache.get_production_by_phase_in_window")
 @patch("data_cache.resolve_orders_to_products")

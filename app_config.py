@@ -36,6 +36,7 @@ class RefreshConfig:
     routing_daily_at: str = "07:00"
     planning_minutes: int = 30
     production_seconds: int = 60
+    rolling_minutes: int = 5
     frontend_polling_seconds: int = 30
 
 

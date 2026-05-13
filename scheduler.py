@@ -45,6 +45,13 @@ def build_scheduler(cache: DataCache, config: AppConfig, conn_factory) -> Backgr
         except Exception as e:
             logger.error("refresh_production failed: %s", e)
 
+    def _job_rolling():
+        try:
+            with conn_factory() as conn:
+                cache.refresh_rolling(conn)
+        except Exception as e:
+            logger.error("refresh_rolling failed: %s", e)
+
     def _job_email():
         try:
             from reporting.email_report import send_daily
@@ -71,6 +78,9 @@ def build_scheduler(cache: DataCache, config: AppConfig, conn_factory) -> Backgr
     sched.add_job(_job_production,
                   IntervalTrigger(seconds=config.refresh.production_seconds),
                   id="refresh_production", coalesce=True, max_instances=1)
+    sched.add_job(_job_rolling,
+                  IntervalTrigger(minutes=config.refresh.rolling_minutes),
+                  id="refresh_rolling", coalesce=True, max_instances=1)
     eh, em = config.email_report.send_at.split(":")
     sched.add_job(_job_email,
                   CronTrigger(hour=int(eh), minute=int(em)),

@@ -23,6 +23,7 @@
     "routing_daily_at": "07:00",
     "planning_minutes": 30,
     "production_seconds": 60,
+    "rolling_minutes": 5,
     "frontend_polling_seconds": 30
   },
   "shifts": [

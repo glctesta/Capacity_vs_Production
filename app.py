@@ -202,6 +202,10 @@ def main():
                 cache.refresh_production(conn)
             except Exception as e:
                 logger.error("initial refresh_production failed: %s", e)
+            try:
+                cache.refresh_rolling(conn)
+            except Exception as e:
+                logger.error("initial refresh_rolling failed: %s", e)
         logger.info("initial load complete")
     except Exception as e:
         logger.error("initial load could not open DB connection: %s -- continuing with empty cache", e)

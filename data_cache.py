@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app_config import AppConfig
 from data_sources.db_history import (
+    get_history_aggregates,
     upsert_cycles, upsert_plan_history, upsert_prod_history,
     replace_anomalies_for_date,
 )
@@ -18,7 +19,8 @@ from data_sources.db_queries import (
 from data_sources.planning_excel import load_today_plan
 from data_sources.routing_excel import load_latest_routing
 from engine.kpi_builder import build_phase_kpi
-from engine.models import PhaseKPI, PlanRow, RollingData, TotalKPI
+from engine.models import DayPoint, PhaseKPI, PlanRow, RollingData, TotalKPI
+from engine.rolling_engine import compute_rolling_month
 from engine.shift_engine import operative_day, shift_window
 
 logger = logging.getLogger("PianoTempi")
@@ -248,6 +250,45 @@ class DataCache:
                 logger.error("upsert_prod_history wrap failed: %s", e)
 
             self.last_refresh_ts["production"] = datetime.now()
+
+    def refresh_rolling(self, conn, now: Optional[datetime] = None) -> None:
+        """Refresh Monthly Rolling + YTD aggregates from SQL history.
+
+        Reads PianoTempi_PlanHistory / PianoTempi_ProdHistory via
+        get_history_aggregates and stores the resulting RollingData in
+        self.rolling_data. Today is excluded by compute_rolling_month
+        (rolling/YTD always reflect closed days only).
+        """
+        with self._lock:
+            now = now or datetime.now()
+            today = operative_day(now)
+            year_start = today.replace(month=1, day=1)
+            try:
+                agg = get_history_aggregates(conn, year_start, today)
+            except Exception as e:
+                logger.error("get_history_aggregates failed: %s", e)
+                agg = []
+            history = [
+                DayPoint(
+                    date=row["date"],
+                    planned_h=float(row["planned_h"]),
+                    produced_h=float(row["produced_h"]),
+                    coverage_pct=float(row["coverage_pct"]),
+                )
+                for row in agg
+            ]
+            self.rolling_data = compute_rolling_month(today, history)
+            self.last_refresh_ts["rolling"] = datetime.now()
+            logger.info(
+                "rolling refreshed: month_plan=%.2fh month_prod=%.2fh "
+                "ytd_plan=%.2fh ytd_prod=%.2fh (%d working days month, %d ytd)",
+                self.rolling_data.month_planned_h,
+                self.rolling_data.month_produced_h,
+                self.rolling_data.ytd_planned_h,
+                self.rolling_data.ytd_produced_h,
+                self.rolling_data.working_days_month,
+                self.rolling_data.working_days_ytd,
+            )
 
     def _build_total_kpi(self, kpis: Dict[str, PhaseKPI]) -> TotalKPI:
         plan_h = round(sum(k.planned_h_day for k in kpis.values()), 2)
